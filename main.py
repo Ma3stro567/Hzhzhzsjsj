@@ -1,526 +1,210 @@
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Updater, CommandHandler, CallbackContext, 
-    CallbackQueryHandler, MessageHandler, Filters
-)
+import asyncio
 import sqlite3
-import re
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.storage.memory import MemoryStorage
 
-# Настройка базы данных
-conn = sqlite3.connect('star_market.db', check_same_thread=False)
+# === НАСТРОЙКИ ===
+API_TOKEN = '7839295746:AAGIaQJtwsS3qX-Cfx7Tp_MFaTDd-MgXkCQ'
+ADMIN_USERNAME = '@Ma3stro274'
+ADMIN_ID = 123456789  # Заменить на настоящий user_id админа
+ADMIN_PASSWORD = '148852'
+
+# === FSM ===
+class AddOffer(StatesGroup):
+    waiting_amount = State()
+    waiting_price = State()
+
+# === ИНИЦИАЛИЗАЦИЯ ===
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+conn = sqlite3.connect("stars_bot.db")
 cursor = conn.cursor()
 
-# Создаем таблицы
-cursor.execute('''
+cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     username TEXT,
-    is_verified BOOLEAN DEFAULT 0,
-    deals_completed INTEGER DEFAULT 0,
-    commission_rate REAL DEFAULT 10.0
-)
-''')
+    verified INTEGER DEFAULT 0,
+    deals INTEGER DEFAULT 0,
+    blacklist INTEGER DEFAULT 0
+)""")
 
-cursor.execute('''
+cursor.execute("""
 CREATE TABLE IF NOT EXISTS offers (
-    offer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
-    stars INTEGER,
-    price REAL,
-    is_active BOOLEAN DEFAULT 1,
-    FOREIGN KEY(user_id) REFERENCES users(user_id)
-)
-''')
-
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS blacklist (
-    user_id INTEGER PRIMARY KEY,
-    FOREIGN KEY(user_id) REFERENCES users(user_id)
-''')
-
+    amount INTEGER,
+    price_per_star INTEGER
+)""")
 conn.commit()
 
-# Конфигурация бота
-BOT_TOKEN = "7839295746:AAGIaQJtwsS3qX-Cfx7Tp_MFaTDd-MgXkCQ"
-ADMIN_USERNAME = "@Ma3stro274"
-ADMIN_PASSWORD = "148852"
-COMMISSION_REGULAR = 10.0
-COMMISSION_VERIFIED = 5.0
+# === УТИЛИТЫ ===
+def is_verified(user_id):
+    cursor.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    return row and row[0] == 1
 
-# Настройка логов
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
-def get_user(user_id):
-    cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-    return cursor.fetchone()
-
-def create_user(user_id, username):
-    if not get_user(user_id):
-        cursor.execute(
-            'INSERT INTO users (user_id, username) VALUES (?, ?)',
-            (user_id, username)
-        )
-        conn.commit()
-
-def get_offers_count(user_id):
-    cursor.execute(
-        'SELECT COUNT(*) FROM offers WHERE user_id = ? AND is_active = 1',
-        (user_id,)
-    )
-    return cursor.fetchone()[0]
+def get_commission(user_id):
+    return 5 if is_verified(user_id) else 10
 
 def get_offer_limit(user_id):
-    user = get_user(user_id)
-    return 4 if user and user[2] else 2  # 2 для обычных, 4 для проверенных
+    return 4 if is_verified(user_id) else 2
 
-# ===================== ОСНОВНЫЕ КОМАНДЫ =====================
-def start(update: Update, context: CallbackContext) -> None:
-    user = update.effective_user
-    create_user(user.id, user.username)
-    
-    text = (
-        f"🌟✨ *Добро пожаловать на Космический рынок звезд\!* ✨🌟\n\n"
-        f"Здесь вы можете покупать и продавать звезды\! 💫\n\n"
-        "🔹 *Продавайте звёзды* \- устанавливайте свою цену\n"
-        "🔹 *Покупайте звёзды* \- находите лучшие предложения\n"
-        "🔹 *Станьте проверенным продавцом* \- снизьте комиссию до 5\% ✅\n\n"
-        "👇 *Используйте команды:*\n"
-        "/addoffer \- добавить предложение\n"
-        "/market \- посмотреть магазин\n"
-        "/profile \- ваш профиль"
-    )
-    
-    update.message.reply_text(text, parse_mode='MarkdownV2')
+# === КНОПКИ ===
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")],
+        [InlineKeyboardButton(text="➕ Добавить предложение", callback_data="add_offer")],
+        [InlineKeyboardButton(text="🗑 Мои предложения", callback_data="my_offers")],
+        [InlineKeyboardButton(text="🛠 Админ панель", callback_data="admin_panel")]
+    ])
 
-def add_offer(update: Update, context: CallbackContext) -> None:
-    user_id = update.effective_user.id
-    username = update.effective_user.username
-    
-    # Проверка черного списка
-    cursor.execute('SELECT 1 FROM blacklist WHERE user_id = ?', (user_id,))
-    if cursor.fetchone():
-        update.message.reply_text("⛔ *Вы в черном списке!* ⛔", parse_mode='MarkdownV2')
-        return
-    
-    # Проверка лимита предложений
-    current_offers = get_offers_count(user_id)
-    offer_limit = get_offer_limit(user_id)
-    
-    if current_offers >= offer_limit:
-        update.message.reply_text(
-            f"🚫 *Достигнут лимит предложений!*\n"
-            f"Ваш лимит: *{offer_limit}* {'⭐' if offer_limit == 2 else '⭐⭐⭐⭐'}\n"
-            f"Удалите одно из текущих предложений",
-            parse_mode='MarkdownV2'
-        )
-        return
-    
-    # Запрос данных
-    context.user_data['creating_offer'] = True
-    update.message.reply_text(
-        "✨ *Создаем новое предложение!* ✨\n\n"
-        "Введите данные в формате:\n"
-        "`<количество звезд> <цена за 1 звезду в рублях>`\n\n"
-        "*Пример:* `5 1000`\n"
-        "\(5 звезд по 1000 руб\. каждая\)",
-        parse_mode='MarkdownV2'
-    )
+# === СТАРТ ===
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (message.from_user.id, message.from_user.username))
+    conn.commit()
+    await message.answer("🌟 Добро пожаловать в маркетплейс звёзд!", reply_markup=main_menu())
 
-def handle_offer_input(update: Update, context: CallbackContext) -> None:
-    if not context.user_data.get('creating_offer'):
-        return
-    
-    user_id = update.effective_user.id
-    try:
-        stars, price = map(float, update.message.text.split())
-        stars = int(stars)
-        
-        if stars <= 0 or price <= 0:
-            raise ValueError("Отрицательные значения")
-            
-        # Проверка лимита
-        current_offers = get_offers_count(user_id)
-        offer_limit = get_offer_limit(user_id)
-        
-        if current_offers >= offer_limit:
-            update.message.reply_text("❗ Лимит предложений изменился в процессе ввода!")
-            return
-        
-        # Добавление в БД
-        cursor.execute(
-            'INSERT INTO offers (user_id, stars, price) VALUES (?, ?, ?)',
-            (user_id, stars, price)
-        )
-        conn.commit()
-        
-        # Расчет с комиссией
-        user = get_user(user_id)
-        commission = COMMISSION_VERIFIED if user[2] else COMMISSION_REGULAR
-        total = stars * price
-        after_commission = total * (1 - commission/100)
-        
-        update.message.reply_text(
-            f"✅ *Предложение добавлено!* ✅\n\n"
-            f"⭐ *Звезд:* {stars}\n"
-            f"💰 *Цена за звезду:* {price} руб\n"
-            f"💎 *Итого:* {total:.2f} руб\n"
-            f"📉 *Комиссия ({commission}%):* {total * commission/100:.2f} руб\n"
-            f"💳 *Вы получите:* {after_commission:.2f} руб\n\n"
-            f"Ваше предложение теперь видно в /market",
-            parse_mode='MarkdownV2'
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка создания предложения: {e}")
-        update.message.reply_text(
-            "❌ *Некорректный формат!*\n"
-            "Используйте: `<количество> <цена>`\n"
-            "*Пример:* `3 1500`",
-            parse_mode='MarkdownV2'
-        )
-    
-    context.user_data['creating_offer'] = False
+# === КНОПКИ ===
+@dp.callback_query(F.data == "profile")
+async def show_profile(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    cursor.execute("SELECT verified, deals FROM users WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    verified = "🟢" if row[0] else "❌"
+    deals = row[1]
+    commission = get_commission(user_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Как стать проверенным?", callback_data="how_to_verify")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+    ])
+    await call.message.edit_text(f"👤 Профиль\n\nЮзер: @{call.from_user.username}\nПроверенный: {verified}\nСделок: {deals}\nКомиссия: {commission}%", reply_markup=kb)
 
-def market(update: Update, context: CallbackContext) -> None:
-    cursor.execute('''
-        SELECT o.offer_id, o.stars, o.price, u.username, u.is_verified 
-        FROM offers o
-        JOIN users u ON o.user_id = u.user_id
-        WHERE o.is_active = 1
-    ''')
+@dp.callback_query(F.data == "how_to_verify")
+async def how_to_verify(call: types.CallbackQuery):
+    await call.message.edit_text("🟢 Чтобы стать проверенным, нужно провести 10 успешных сделок через администратора.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]]))
+
+@dp.callback_query(F.data == "shop")
+async def show_shop(call: types.CallbackQuery):
+    cursor.execute("""
+        SELECT offers.id, users.username, offers.amount, offers.price_per_star, users.verified 
+        FROM offers JOIN users ON offers.user_id = users.user_id
+    """)
     offers = cursor.fetchall()
-    
     if not offers:
-        update.message.reply_text("😔 *В магазине пока нет предложений!*", parse_mode='MarkdownV2')
-        return
-    
-    text = "🛒 *Космический рынок звезд* 🪐\n\n"
-    for offer in offers:
-        status = "✅" if offer[4] else "❌"
-        text += (
-            f"{status} *Продавец:* @{offer[3]}\n"
-            f"⭐ *Звезд:* {offer[1]}\n"
-            f"💰 *Цена за штуку:* {offer[2]} руб\n"
-            f"💎 *Сумма:* {offer[1] * offer[2]} руб\n"
-            f"[Купить](https://t.me/{ADMIN_USERNAME[1:]}) | ID: `{offer[0]}`\n"
-            "――――――――――――――――――――\n"
-        )
-    
-    # Создаем инлайн-кнопки
-    keyboard = [
-        [InlineKeyboardButton("🔍 Обновить", callback_data='refresh_market')],
-        [InlineKeyboardButton("👤 Мой профиль", callback_data='my_profile')]
-    ]
-    
-    update.message.reply_text(
-        text, 
-        parse_mode='MarkdownV2',
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        disable_web_page_preview=True
-    )
+        return await call.message.edit_text("🛍 Магазин пуст.", reply_markup=main_menu())
 
-def profile(update: Update, context: CallbackContext) -> None:
-    user = update.effective_user
-    db_user = get_user(user.id)
-    
-    if not db_user:
-        create_user(user.id, user.username)
-        db_user = get_user(user.id)
-    
-    is_verified = db_user[2]
-    deals = db_user[3]
-    commission = db_user[4]
-    offer_count = get_offers_count(user.id)
-    offer_limit = get_offer_limit(user.id)
-    
-    status = "✅ Проверенный" if is_verified else "❌ Непроверенный"
-    status_emoji = "🟢" if is_verified else "🔴"
-    
-    text = (
-        f"{status_emoji} *Ваш профиль*\n\n"
-        f"👤 *Юзернейм:* @{user.username}\n"
-        f"📛 *Статус:* {status}\n"
-        f"📊 *Завершенные сделки:* {deals}\n"
-        f"📉 *Комиссия:* {commission}%\n"
-        f"📦 *Активные предложения:* {offer_count}/{offer_limit}\n\n"
-    )
-    
-    # Кнопка "Как стать проверенным?"
-    keyboard = [[
-        InlineKeyboardButton("❓ Как стать проверенным?", callback_data='how_to_verify')
-    ]]
-    
-    update.message.reply_text(
-        text, 
-        parse_mode='MarkdownV2',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    buttons = []
+    for offer_id, username, amount, price, verified in offers:
+        label = f"{'🟢 ' if verified else ''}@{username}: {amount}⭐ по {price}₽"
+        buttons.append([InlineKeyboardButton(text=label, url=f"https://t.me/{ADMIN_USERNAME[1:]}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
+    await call.message.edit_text("🛍 Все предложения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-# ===================== АДМИН-ПАНЕЛЬ =====================
-def admin_panel(update: Update, context: CallbackContext) -> None:
-    user = update.effective_user
-    text = "🔐 *Введите пароль для доступа к админ-панели:*"
-    context.user_data['awaiting_password'] = True
-    update.message.reply_text(text, parse_mode='MarkdownV2')
+@dp.callback_query(F.data == "add_offer")
+async def start_add_offer(call: types.CallbackQuery, state: FSMContext):
+    cursor.execute("SELECT COUNT(*) FROM offers WHERE user_id=?", (call.from_user.id,))
+    count = cursor.fetchone()[0]
+    if count >= get_offer_limit(call.from_user.id):
+        return await call.message.answer("⚠️ Превышен лимит предложений.")
+    await call.message.answer("✍️ Введите количество звёзд:")
+    await state.set_state(AddOffer.waiting_amount)
 
-def handle_admin_password(update: Update, context: CallbackContext) -> None:
-    if not context.user_data.get('awaiting_password'):
-        return
-        
-    if update.message.text == ADMIN_PASSWORD:
-        # Показать админ-меню
-        keyboard = [
-            [InlineKeyboardButton("📢 Сделать рассылку", callback_data='admin_broadcast')],
-            [InlineKeyboardButton("⛔ Добавить в ЧС", callback_data='admin_ban')],
-            [InlineKeyboardButton("✅ Верифицировать пользователя", callback_data='admin_verify')],
-            [InlineKeyboardButton("📊 Статистика", callback_data='admin_stats')]
-        ]
-        
-        update.message.reply_text(
-            "👑 *Админ-панель активирована!* 👑\n"
-            "Выберите действие:",
-            parse_mode='MarkdownV2',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    else:
-        update.message.reply_text("❌ *Неверный пароль!*", parse_mode='MarkdownV2')
-        
-    context.user_data['awaiting_password'] = False
+@dp.message(AddOffer.waiting_amount)
+async def offer_amount(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        return await message.answer("❌ Введите число.")
+    await state.update_data(amount=int(message.text))
+    await message.answer("💸 Введите цену за 1 звезду (₽):")
+    await state.set_state(AddOffer.waiting_price)
 
-# ===================== CALLBACK HANDLERS =====================
-def button_handler(update: Update, context: CallbackContext) -> None:
-    query = update.callback_query
-    query.answer()
-    
-    # Обновление магазина
-    if query.data == 'refresh_market':
-        cursor.execute('''
-            SELECT o.offer_id, o.stars, o.price, u.username, u.is_verified 
-            FROM offers o
-            JOIN users u ON o.user_id = u.user_id
-            WHERE o.is_active = 1
-        ''')
-        offers = cursor.fetchall()
-        
-        if not offers:
-            query.edit_message_text("😔 *В магазине пока нет предложений!*", parse_mode='MarkdownV2')
-            return
-        
-        text = "🛒 *Космический рынок звезд* 🪐\n\n"
-        for offer in offers:
-            status = "✅" if offer[4] else "❌"
-            text += (
-                f"{status} *Продавец:* @{offer[3]}\n"
-                f"⭐ *Звезд:* {offer[1]}\n"
-                f"💰 *Цена за штуку:* {offer[2]} руб\n"
-                f"💎 *Сумма:* {offer[1] * offer[2]} руб\n"
-                f"[Купить](https://t.me/{ADMIN_USERNAME[1:]}) | ID: `{offer[0]}`\n"
-                "――――――――――――――――――――\n"
-            )
-        
-        keyboard = [
-            [InlineKeyboardButton("🔍 Обновить", callback_data='refresh_market')],
-            [InlineKeyboardButton("👤 Мой профиль", callback_data='my_profile')]
-        ]
-        
-        query.edit_message_text(
-            text, 
-            parse_mode='MarkdownV2',
-            reply_markup=InlineKeyboardMarkup(keyboard)),
-            disable_web_page_preview=True
-        )
-    
-    # Профиль пользователя
-    elif query.data == 'my_profile':
-        user = query.from_user
-        db_user = get_user(user.id)
-        is_verified = db_user[2]
-        deals = db_user[3]
-        commission = db_user[4]
-        offer_count = get_offers_count(user.id)
-        offer_limit = get_offer_limit(user.id)
-        
-        status = "✅ Проверенный" if is_verified else "❌ Непроверенный"
-        status_emoji = "🟢" if is_verified else "🔴"
-        
-        text = (
-            f"{status_emoji} *Ваш профиль*\n\n"
-            f"👤 *Юзернейм:* @{user.username}\n"
-            f"📛 *Статус:* {status}\n"
-            f"📊 *Завершенные сделки:* {deals}\n"
-            f"📉 *Комиссия:* {commission}%\n"
-            f"📦 *Активные предложения:* {offer_count}/{offer_limit}\n\n"
-        )
-        
-        keyboard = [[
-            InlineKeyboardButton("❓ Как стать проверенным?", callback_data='how_to_verify')
-        ]]
-        
-        query.edit_message_text(
-            text, 
-            parse_mode='MarkdownV2',
-            reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    # Как стать проверенным
-    elif query.data == 'how_to_verify':
-        text = (
-            "🌟 *Как стать проверенным продавцом?* 🌟\n\n"
-            "1\. Пройдите *10 успешных сделок*\n"
-            "2\. Обратитесь к администратору @Ma3stro274\n"
-            "3\. После проверки получите статус ✅\n\n"
-            "*Преимущества:*\n"
-            f"✅ Сниженная комиссия *{COMMISSION_VERIFIED}%* вместо {COMMISSION_REGULAR}%\n"
-            f"✅ Лимит предложений *4⭐* вместо 2⭐\n"
-            "✅ Зеленая отметка в магазине\n\n"
-            "🔄 После 10 сделок администратор добавит вас вручную"
-        )
-        keyboard = [[
-            InlineKeyboardButton("👤 Назад в профиль", callback_data='my_profile'),
-            InlineKeyboardButton("🛒 В магазин", callback_data='refresh_market')
-        ]]
-        query.edit_message_text(
-            text, 
-            parse_mode='MarkdownV2',
-            reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    # Админ: Рассылка
-    elif query.data == 'admin_broadcast':
-        context.user_data['admin_action'] = 'broadcast'
-        query.message.reply_text("📢 *Введите текст рассылки:*", parse_mode='MarkdownV2')
-    
-    # Админ: Бан пользователя
-    elif query.data == 'admin_ban':
-        context.user_data['admin_action'] = 'ban_user'
-        query.message.reply_text(
-            "⛔ *Введите ID пользователя для добавления в ЧС:*\n"
-            "\(можно узнать через /profile пользователя\)",
-            parse_mode='MarkdownV2'
-        )
-    
-    # Админ: Верификация
-    elif query.data == 'admin_verify':
-        context.user_data['admin_action'] = 'verify_user'
-        query.message.reply_text(
-            "✅ *Введите ID пользователя для верификации:*\n"
-            "\(можно узнать через /profile пользователя\)",
-            parse_mode='MarkdownV2'
-        )
-    
-    # Админ: Статистика
-    elif query.data == 'admin_stats':
-        cursor.execute("SELECT COUNT(*) FROM users")
-        total_users = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM offers WHERE is_active = 1")
-        active_offers = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM blacklist")
-        banned_users = cursor.fetchone()[0]
-        
-        text = (
-            "📊 *Статистика бота*\n\n"
-            f"👥 Пользователи: *{total_users}*\n"
-            f"🛒 Активные предложения: *{active_offers}*\n"
-            f"⛔ Заблокированные: *{banned_users}*"
-        )
-        query.message.reply_text(text, parse_mode='MarkdownV2')
+@dp.message(AddOffer.waiting_price)
+async def offer_price(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        return await message.answer("❌ Введите число.")
+    data = await state.get_data()
+    cursor.execute("INSERT INTO offers (user_id, amount, price_per_star) VALUES (?, ?, ?)",
+                   (message.from_user.id, data['amount'], int(message.text)))
+    conn.commit()
+    await message.answer("✅ Предложение добавлено!", reply_markup=main_menu())
+    await state.clear()
 
-# ===================== АДМИН-ДЕЙСТВИЯ =====================
-def handle_admin_action(update: Update, context: CallbackContext) -> None:
-    action = context.user_data.get('admin_action')
-    if not action:
-        return
-    
-    try:
-        # Рассылка
-        if action == 'broadcast':
-            text = update.message.text
-            
-            cursor.execute("SELECT user_id FROM users")
-            users = cursor.fetchall()
-            
-            for user in users:
-                try:
-                    context.bot.send_message(
-                        chat_id=user[0],
-                        text=text,
-                        parse_mode='MarkdownV2'
-                    )
-                except Exception as e:
-                    logger.error(f"Ошибка рассылки: {e}")
-            
-            update.message.reply_text(f"✅ *Рассылка отправлена {len(users)} пользователям!*", parse_mode='MarkdownV2')
-        
-        # Бан пользователя
-        elif action == 'ban_user':
-            user_id = int(update.message.text)
-            
-            # Проверка существования
-            if not get_user(user_id):
-                update.message.reply_text("❌ Пользователь не найден!")
-                return
-            
-            # Добавление в ЧС
-            cursor.execute("INSERT OR IGNORE INTO blacklist (user_id) VALUES (?)", (user_id,))
-            
-            # Деактивация предложений
-            cursor.execute("UPDATE offers SET is_active = 0 WHERE user_id = ?", (user_id,))
-            conn.commit()
-            
-            update.message.reply_text(f"⛔ *Пользователь {user_id} добавлен в ЧС!*", parse_mode='MarkdownV2')
-        
-        # Верификация
-        elif action == 'verify_user':
-            user_id = int(update.message.text)
-            
-            user = get_user(user_id)
-            if not user:
-                update.message.reply_text("❌ Пользователь не найден!")
-                return
-                
-            # Обновление статуса и комиссии
-            cursor.execute(
-                "UPDATE users SET is_verified = 1, commission_rate = ? WHERE user_id = ?",
-                (COMMISSION_VERIFIED, user_id)
-            )
-            conn.commit()
-            
-            update.message.reply_text(f"✅ *Пользователь {user_id} теперь проверенный!*", parse_mode='MarkdownV2')
-    
-    except Exception as e:
-        logger.error(f"Ошибка админ-действия: {e}")
-        update.message.reply_text("❌ Ошибка выполнения команды!")
-    
-    context.user_data['admin_action'] = None
+@dp.callback_query(F.data == "my_offers")
+async def my_offers(call: types.CallbackQuery):
+    cursor.execute("SELECT id, amount, price_per_star FROM offers WHERE user_id=?", (call.from_user.id,))
+    offers = cursor.fetchall()
+    if not offers:
+        return await call.message.edit_text("У вас нет предложений.", reply_markup=main_menu())
+    kb = []
+    for offer_id, amount, price in offers:
+        kb.append([InlineKeyboardButton(text=f"❌ Удалить {amount}⭐ по {price}₽", callback_data=f"del_{offer_id}")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
+    await call.message.edit_text("Ваши предложения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# ===================== ЗАПУСК БОТА =====================
-def main() -> None:
-    updater = Updater(BOT_TOKEN)
-    dp = updater.dispatcher
+@dp.callback_query(F.data.startswith("del_"))
+async def delete_offer(call: types.CallbackQuery):
+    offer_id = int(call.data.split("_")[1])
+    cursor.execute("DELETE FROM offers WHERE id=? AND user_id=?", (offer_id, call.from_user.id))
+    conn.commit()
+    await call.message.answer("✅ Удалено.", reply_markup=main_menu())
 
-    # Основные команды
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("addoffer", add_offer))
-    dp.add_handler(CommandHandler("market", market))
-    dp.add_handler(CommandHandler("profile", profile))
-    dp.add_handler(CommandHandler("adminpanel", admin_panel))
-    
-    # Обработчики сообщений
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_offer_input))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_admin_password))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_admin_action))
-    
-    # Обработчики кнопок
-    dp.add_handler(CallbackQueryHandler(button_handler))
+@dp.callback_query(F.data == "admin_panel")
+async def admin_panel(call: types.CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return await call.message.answer("⛔ Нет доступа.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="broadcast")],
+        [InlineKeyboardButton(text="✅ Сделать проверенным", callback_data="verify")],
+        [InlineKeyboardButton(text="➕ Добавить сделку", callback_data="add_deal")],
+        [InlineKeyboardButton(text="🚫 Заблокировать", callback_data="ban")]
+    ])
+    await call.message.edit_text("🛠 Админ панель:", reply_markup=kb)
 
-    updater.start_polling()
-    updater.idle()
+@dp.callback_query(F.data == "verify")
+async def verify_user(call: types.CallbackQuery):
+    await call.message.answer("Введите user_id пользователя для проверки:")
 
-if __name__ == '__main__':
-    main()
+    @dp.message()
+    async def set_verified(msg: types.Message):
+        cursor.execute("UPDATE users SET verified=1 WHERE user_id=?", (int(msg.text),))
+        conn.commit()
+        await msg.answer("✅ Сделан проверенным.")
+
+@dp.callback_query(F.data == "add_deal")
+async def add_deal(call: types.CallbackQuery):
+    await call.message.answer("Введите user_id для добавления сделки:")
+
+    @dp.message()
+    async def add_one_deal(msg: types.Message):
+        cursor.execute("UPDATE users SET deals = deals + 1 WHERE user_id=?", (int(msg.text),))
+        conn.commit()
+        await msg.answer("✅ Сделка добавлена.")
+
+@dp.callback_query(F.data == "ban")
+async def ban_user(call: types.CallbackQuery):
+    await call.message.answer("Введите user_id для бана:")
+
+    @dp.message()
+    async def ban(msg: types.Message):
+        cursor.execute("UPDATE users SET blacklist=1 WHERE user_id=?", (int(msg.text),))
+        conn.commit()
+        await msg.answer("🚫 Пользователь заблокирован.")
+
+@dp.callback_query(F.data == "back")
+async def go_back(call: types.CallbackQuery):
+    await call.message.edit_text("🌟 Главное меню:", reply_markup=main_menu())
+
+# === ЗАПУСК ===
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+                       
