@@ -1,210 +1,148 @@
-import asyncio
-import sqlite3
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.storage.memory import MemoryStorage
+import telebot
+from telebot import types
 
-# === НАСТРОЙКИ ===
-API_TOKEN = '7839295746:AAGIaQJtwsS3qX-Cfx7Tp_MFaTDd-MgXkCQ'
+TOKEN = '7839295746:AAGIaQJtwsS3qX-Cfx7Tp_MFaTDd-MgXkCQ'
 ADMIN_USERNAME = '@Ma3stro274'
-ADMIN_ID = 5083696616 # Заменить на настоящий user_id админа
+ADMIN_ID = 5083696616  # Замените на настоящий ID админа
 ADMIN_PASSWORD = '148852'
 
-# === FSM ===
-class AddOffer(StatesGroup):
-    waiting_amount = State()
-    waiting_price = State()
+bot = telebot.TeleBot(TOKEN)
 
-# === ИНИЦИАЛИЗАЦИЯ ===
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+# Хранилище данных
+users = {}
+offers = []
+blacklist = set()
+verified = set()
+deal_count = {}
+commission_data = {}
+MAX_OFFERS = {"verified": 4, "unverified": 2}
 
-conn = sqlite3.connect("stars_bot.db")
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    verified INTEGER DEFAULT 0,
-    deals INTEGER DEFAULT 0,
-    blacklist INTEGER DEFAULT 0
-)""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS offers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    amount INTEGER,
-    price_per_star INTEGER
-)""")
-conn.commit()
-
-# === УТИЛИТЫ ===
 def is_verified(user_id):
-    cursor.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    return row and row[0] == 1
+    return user_id in verified
 
 def get_commission(user_id):
     return 5 if is_verified(user_id) else 10
 
-def get_offer_limit(user_id):
-    return 4 if is_verified(user_id) else 2
+def can_post_offer(user_id):
+    user_offers = [o for o in offers if o["seller_id"] == user_id]
+    limit = MAX_OFFERS["verified" if is_verified(user_id) else "unverified"]
+    return len(user_offers) < limit
 
-# === КНОПКИ ===
-def main_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-        [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")],
-        [InlineKeyboardButton(text="➕ Добавить предложение", callback_data="add_offer")],
-        [InlineKeyboardButton(text="🗑 Мои предложения", callback_data="my_offers")],
-        [InlineKeyboardButton(text="🛠 Админ панель", callback_data="admin_panel")]
-    ])
+@bot.message_handler(commands=["start"])
+def start(message):
+    user_id = message.from_user.id
+    users[user_id] = message.from_user.username
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🛒 Магазин", callback_data="shop"))
+    markup.add(types.InlineKeyboardButton("➕ Продать звёзды", callback_data="sell"))
+    markup.add(types.InlineKeyboardButton("👤 Профиль", callback_data="profile"))
+    bot.send_message(user_id, "⭐ Добро пожаловать в бот по продаже звёзд!", reply_markup=markup)
 
-# === СТАРТ ===
-@dp.message(CommandStart())
-async def start(message: types.Message):
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (message.from_user.id, message.from_user.username))
-    conn.commit()
-    await message.answer("🌟 Добро пожаловать в маркетплейс звёзд!", reply_markup=main_menu())
+@bot.message_handler(commands=["adminpanel"])
+def admin_panel(message):
+    if str(message.text).endswith(ADMIN_PASSWORD):
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("📬 Рассылка", callback_data="broadcast"))
+        markup.add(types.InlineKeyboardButton("✅ Проверить пользователя", callback_data="verify"))
+        markup.add(types.InlineKeyboardButton("⛔ ЧС", callback_data="blacklist"))
+        bot.send_message(message.chat.id, "🎛 Панель администратора:", reply_markup=markup)
 
-# === КНОПКИ ===
-@dp.callback_query(F.data == "profile")
-async def show_profile(call: types.CallbackQuery):
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
     user_id = call.from_user.id
-    cursor.execute("SELECT verified, deals FROM users WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    verified = "🟢" if row[0] else "❌"
-    deals = row[1]
-    commission = get_commission(user_id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📈 Как стать проверенным?", callback_data="how_to_verify")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-    ])
-    await call.message.edit_text(f"👤 Профиль\n\nЮзер: @{call.from_user.username}\nПроверенный: {verified}\nСделок: {deals}\nКомиссия: {commission}%", reply_markup=kb)
 
-@dp.callback_query(F.data == "how_to_verify")
-async def how_to_verify(call: types.CallbackQuery):
-    await call.message.edit_text("🟢 Чтобы стать проверенным, нужно провести 10 успешных сделок через администратора.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]]))
+    if user_id in blacklist:
+        bot.answer_callback_query(call.id, "Вы в черном списке.")
+        return
 
-@dp.callback_query(F.data == "shop")
-async def show_shop(call: types.CallbackQuery):
-    cursor.execute("""
-        SELECT offers.id, users.username, offers.amount, offers.price_per_star, users.verified 
-        FROM offers JOIN users ON offers.user_id = users.user_id
-    """)
-    offers = cursor.fetchall()
-    if not offers:
-        return await call.message.edit_text("🛍 Магазин пуст.", reply_markup=main_menu())
+    if call.data == "shop":
+        if not offers:
+            bot.send_message(user_id, "❌ Пока нет предложений.")
+            return
+        for offer in offers:
+            username = users.get(offer["seller_id"], "неизвестно")
+            verified_mark = "🟢" if offer["seller_id"] in verified else "🔘"
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("💬 Связаться", url=f"https://t.me/{ADMIN_USERNAME[1:]}"))
+            bot.send_message(user_id, f"{verified_mark} @{username}\n"
+                                      f"⭐ Кол-во: {offer['count']}\n"
+                                      f"💰 Цена за звезду: {offer['price']}₽", reply_markup=markup)
 
-    buttons = []
-    for offer_id, username, amount, price, verified in offers:
-        label = f"{'🟢 ' if verified else ''}@{username}: {amount}⭐ по {price}₽"
-        buttons.append([InlineKeyboardButton(text=label, url=f"https://t.me/{ADMIN_USERNAME[1:]}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
-    await call.message.edit_text("🛍 Все предложения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    elif call.data == "sell":
+        if not can_post_offer(user_id):
+            bot.send_message(user_id, "⚠️ Превышен лимит предложений.")
+            return
+        msg = bot.send_message(user_id, "Введите количество звёзд:")
+        bot.register_next_step_handler(msg, process_star_count)
 
-@dp.callback_query(F.data == "add_offer")
-async def start_add_offer(call: types.CallbackQuery, state: FSMContext):
-    cursor.execute("SELECT COUNT(*) FROM offers WHERE user_id=?", (call.from_user.id,))
-    count = cursor.fetchone()[0]
-    if count >= get_offer_limit(call.from_user.id):
-        return await call.message.answer("⚠️ Превышен лимит предложений.")
-    await call.message.answer("✍️ Введите количество звёзд:")
-    await state.set_state(AddOffer.waiting_amount)
+    elif call.data == "profile":
+        username = users.get(user_id, "неизвестно")
+        verified_mark = "🟢" if user_id in verified else "🔘"
+        deals = deal_count.get(user_id, 0)
+        comm = get_commission(user_id)
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("❓ Как стать проверенным?", callback_data="how_verify"))
+        bot.send_message(user_id, f"{verified_mark} @{username}\n"
+                                  f"✅ Сделок: {deals}\n"
+                                  f"💸 Комиссия: {comm}%", reply_markup=markup)
 
-@dp.message(AddOffer.waiting_amount)
-async def offer_amount(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        return await message.answer("❌ Введите число.")
-    await state.update_data(amount=int(message.text))
-    await message.answer("💸 Введите цену за 1 звезду (₽):")
-    await state.set_state(AddOffer.waiting_price)
+    elif call.data == "how_verify":
+        bot.send_message(user_id, "Чтобы стать проверенным, нужно успешно провести 10 сделок 💼")
 
-@dp.message(AddOffer.waiting_price)
-async def offer_price(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        return await message.answer("❌ Введите число.")
-    data = await state.get_data()
-    cursor.execute("INSERT INTO offers (user_id, amount, price_per_star) VALUES (?, ?, ?)",
-                   (message.from_user.id, data['amount'], int(message.text)))
-    conn.commit()
-    await message.answer("✅ Предложение добавлено!", reply_markup=main_menu())
-    await state.clear()
+    elif call.data == "broadcast":
+        msg = bot.send_message(user_id, "Введите текст для рассылки:")
+        bot.register_next_step_handler(msg, process_broadcast)
 
-@dp.callback_query(F.data == "my_offers")
-async def my_offers(call: types.CallbackQuery):
-    cursor.execute("SELECT id, amount, price_per_star FROM offers WHERE user_id=?", (call.from_user.id,))
-    offers = cursor.fetchall()
-    if not offers:
-        return await call.message.edit_text("У вас нет предложений.", reply_markup=main_menu())
-    kb = []
-    for offer_id, amount, price in offers:
-        kb.append([InlineKeyboardButton(text=f"❌ Удалить {amount}⭐ по {price}₽", callback_data=f"del_{offer_id}")])
-    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
-    await call.message.edit_text("Ваши предложения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    elif call.data == "verify":
+        msg = bot.send_message(user_id, "Введите ID пользователя для проверки:")
+        bot.register_next_step_handler(msg, lambda m: verify_user(m))
 
-@dp.callback_query(F.data.startswith("del_"))
-async def delete_offer(call: types.CallbackQuery):
-    offer_id = int(call.data.split("_")[1])
-    cursor.execute("DELETE FROM offers WHERE id=? AND user_id=?", (offer_id, call.from_user.id))
-    conn.commit()
-    await call.message.answer("✅ Удалено.", reply_markup=main_menu())
+    elif call.data == "blacklist":
+        msg = bot.send_message(user_id, "Введите ID пользователя для ЧС:")
+        bot.register_next_step_handler(msg, lambda m: blacklist_user(m))
 
-@dp.callback_query(F.data == "admin_panel")
-async def admin_panel(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        return await call.message.answer("⛔ Нет доступа.")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="broadcast")],
-        [InlineKeyboardButton(text="✅ Сделать проверенным", callback_data="verify")],
-        [InlineKeyboardButton(text="➕ Добавить сделку", callback_data="add_deal")],
-        [InlineKeyboardButton(text="🚫 Заблокировать", callback_data="ban")]
-    ])
-    await call.message.edit_text("🛠 Админ панель:", reply_markup=kb)
+def process_star_count(message):
+    user_id = message.from_user.id
+    try:
+        count = int(message.text)
+        msg = bot.send_message(user_id, "Введите цену за одну звезду (в ₽):")
+        bot.register_next_step_handler(msg, lambda m: process_price(m, count))
+    except:
+        bot.send_message(user_id, "❌ Ошибка ввода. Попробуйте снова.")
 
-@dp.callback_query(F.data == "verify")
-async def verify_user(call: types.CallbackQuery):
-    await call.message.answer("Введите user_id пользователя для проверки:")
+def process_price(message, count):
+    user_id = message.from_user.id
+    try:
+        price = float(message.text)
+        offers.append({"seller_id": user_id, "count": count, "price": price})
+        bot.send_message(user_id, "✅ Ваше предложение добавлено в магазин!")
+    except:
+        bot.send_message(user_id, "❌ Неверный формат цены.")
 
-    @dp.message()
-    async def set_verified(msg: types.Message):
-        cursor.execute("UPDATE users SET verified=1 WHERE user_id=?", (int(msg.text),))
-        conn.commit()
-        await msg.answer("✅ Сделан проверенным.")
+def process_broadcast(message):
+    text = message.text
+    for uid in users:
+        try:
+            bot.send_message(uid, f"📢 {text}")
+        except:
+            continue
+    bot.send_message(message.chat.id, "✅ Рассылка завершена!")
 
-@dp.callback_query(F.data == "add_deal")
-async def add_deal(call: types.CallbackQuery):
-    await call.message.answer("Введите user_id для добавления сделки:")
+def verify_user(message):
+    try:
+        uid = int(message.text)
+        verified.add(uid)
+        bot.send_message(message.chat.id, f"✅ Пользователь {uid} теперь проверен.")
+    except:
+        bot.send_message(message.chat.id, "❌ Неверный ID.")
 
-    @dp.message()
-    async def add_one_deal(msg: types.Message):
-        cursor.execute("UPDATE users SET deals = deals + 1 WHERE user_id=?", (int(msg.text),))
-        conn.commit()
-        await msg.answer("✅ Сделка добавлена.")
+def blacklist_user(message):
+    try:
+        uid = int(message.text)
+        blacklist.add(uid)
+        bot.send_message(message.chat.id, f"⛔ Пользователь {uid} добавлен в ЧС.")
+    except:
+        bot.send_message(message.chat.id, "❌ Неверный ID.")
 
-@dp.callback_query(F.data == "ban")
-async def ban_user(call: types.CallbackQuery):
-    await call.message.answer("Введите user_id для бана:")
-
-    @dp.message()
-    async def ban(msg: types.Message):
-        cursor.execute("UPDATE users SET blacklist=1 WHERE user_id=?", (int(msg.text),))
-        conn.commit()
-        await msg.answer("🚫 Пользователь заблокирован.")
-
-@dp.callback_query(F.data == "back")
-async def go_back(call: types.CallbackQuery):
-    await call.message.edit_text("🌟 Главное меню:", reply_markup=main_menu())
-
-# === ЗАПУСК ===
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-                       
+print("Бот запущен...")
+bot.polling()
