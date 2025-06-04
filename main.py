@@ -1,7 +1,7 @@
 import telebot
 from telebot import types
 
-TOKEN = '7839295746:AAGbr-9qXH_PmfZDUFeCv4utaDxF6H2X94A'
+TOKEN = '7839295746:AAFAJHuQMJR9ygr40DJGfIEUAIXBqKZ1aMs'
 ADMIN_ID = 5083696616 # Замените на ваш Telegram ID
 ADMIN_USERNAME = '@Ma3stro274'
 ADMIN_PANEL_PASSWORD = '148852'
@@ -71,7 +71,7 @@ def start(message):
     markup.add(types.InlineKeyboardButton('📤 Продать звезды', callback_data='sell'))
     markup.add(types.InlineKeyboardButton('👤 Профиль', callback_data='profile'))
 
-    bot.send_message(user_id, '⭐ Добро пожаловать в магазин звезд! ⭐', reply_markup=markup)
+    bot.send_message(user_id, '⭐ Добро пожаловать в Ma3stro shop!', reply_markup=markup)
 
 
 # 📤 Продажа
@@ -198,7 +198,7 @@ def broadcast(callback):
 def send_broadcast(message):
     for uid in users:
         try:
-            bot.send_message(uid, f"📢 {message.text}")
+            bot.send_message(uid, f" {message.text}")
         except:
             continue
 
