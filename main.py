@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # === НАСТРОЙКИ ===
 API_TOKEN = '7839295746:AAGIaQJtwsS3qX-Cfx7Tp_MFaTDd-MgXkCQ'
 ADMIN_USERNAME = '@Ma3stro274'
-ADMIN_ID = 123456789  # Заменить на настоящий user_id админа
+ADMIN_ID = 5083696616 # Заменить на настоящий user_id админа
 ADMIN_PASSWORD = '148852'
 
 # === FSM ===
