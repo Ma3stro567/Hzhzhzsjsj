@@ -1,8 +1,8 @@
 import telebot
 from telebot import types
 
-TOKEN = '7839295746:AAFAJHuQMJR9ygr40DJGfIEUAIXBqKZ1aMs'
-ADMIN_ID = 5083696616 # Замените на ваш Telegram ID
+TOKEN = '7839295746:AAFTpDNE41nEsAJ4Lr8opnps6BVE4ZrItxg'
+ADMIN_ID = 5083696616
 ADMIN_USERNAME = '@Ma3stro274'
 ADMIN_PANEL_PASSWORD = '148852'
 
@@ -16,45 +16,20 @@ edit_offer_state = {}
 deal_add_state = {}
 delete_offer_state = {}
 
-# 📦 Структура пользователя:
-# users[user_id] = {
-#     'username': str,
-#     'verified': bool,
-#     'deal_count': int
-# }
-
-# 📦 Структура предложения:
-# {
-#     'user_id': int,
-#     'username': str,
-#     'stars': int,
-#     'price': float
-# }
-
-
-# ✅ Проверка на ЧС
 def is_blacklisted(user_id):
     return user_id in blacklist
 
-
-# ✅ Ограничение предложений
 def user_offer_limit(user_id):
     verified = users.get(user_id, {}).get('verified', False)
     return 4 if verified else 2
 
-
-# ✅ Подсчёт предложений пользователя
 def user_offer_count(user_id):
     return len([o for o in offers if o['user_id'] == user_id])
 
-
-# 🟢 Комиссия
 def get_commission(user_id):
     verified = users.get(user_id, {}).get('verified', False)
     return 5 if verified else 10
 
-
-# 🎯 Старт
 @bot.message_handler(commands=['start'])
 def start(message):
     if is_blacklisted(message.from_user.id):
@@ -73,27 +48,20 @@ def start(message):
 
     bot.send_message(user_id, '⭐ Добро пожаловать в Ma3stro shop!', reply_markup=markup)
 
-
-# 📤 Продажа
 @bot.callback_query_handler(func=lambda c: c.data == 'sell')
 def sell(callback):
     user_id = callback.from_user.id
-
-    if is_blacklisted(user_id):
-        return
-
+    if is_blacklisted(user_id): return
     if user_offer_count(user_id) >= user_offer_limit(user_id):
         bot.answer_callback_query(callback.id, '❌ Лимит предложений достигнут!')
         return
-
     msg = bot.send_message(user_id, '🌟 Введите количество звёзд:')
     bot.register_next_step_handler(msg, process_stars)
 
 def process_stars(message):
     try:
         stars = int(message.text)
-        if stars <= 0:
-            raise ValueError
+        if stars <= 0: raise ValueError
         msg = bot.send_message(message.chat.id, '💸 Введите цену за 1 звезду (₽):')
         bot.register_next_step_handler(msg, lambda m: process_price(m, stars))
     except:
@@ -102,8 +70,7 @@ def process_stars(message):
 def process_price(message, stars):
     try:
         price = float(message.text)
-        if price <= 0:
-            raise ValueError
+        if price <= 0: raise ValueError
         user_id = message.from_user.id
         username = users[user_id]['username']
         offers.append({'user_id': user_id, 'username': username, 'stars': stars, 'price': price})
@@ -111,26 +78,28 @@ def process_price(message, stars):
     except:
         bot.send_message(message.chat.id, '❌ Введите корректную цену.')
 
-
-# 🛒 Магазин
 @bot.callback_query_handler(func=lambda c: c.data == 'shop')
 def shop(callback):
     user_id = callback.from_user.id
-
-    if is_blacklisted(user_id):
-        return
+    if is_blacklisted(user_id): return
 
     if not offers:
-        bot.send_message(user_id, '❌ Предложений пока нет.')
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton('🔙 Назад', callback_data='back_to_main'))
+        bot.send_message(user_id, '❌ Предложений пока нет.', reply_markup=markup)
         return
 
-    for i, offer in enumerate(offers):
-        offer_markup = types.InlineKeyboardMarkup()
-        offer_markup.add(types.InlineKeyboardButton('💬 Купить (через админа)', url=f"https://t.me/{ADMIN_USERNAME[1:]}") )
-        bot.send_message(user_id, f"⭐ @{offer['username']} | {offer['stars']} звёзд по {offer['price']}₽", reply_markup=offer_markup)
+    for offer in offers:
+        verified = users.get(offer['user_id'], {}).get('verified', False)
+        status = '🟢' if verified else '🔘'
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton('💬 Купить (через админа)', url=f"https://t.me/{ADMIN_USERNAME[1:]}"))
+        bot.send_message(user_id, f"{status} @{offer['username']} | {offer['stars']} звёзд по {offer['price']}₽", reply_markup=markup)
 
+    back_markup = types.InlineKeyboardMarkup()
+    back_markup.add(types.InlineKeyboardButton('🔙 Назад', callback_data='back_to_main'))
+    bot.send_message(user_id, "\u200b", reply_markup=back_markup)
 
-# 👤 Профиль
 @bot.callback_query_handler(func=lambda c: c.data == 'profile')
 def profile(callback):
     user_id = callback.from_user.id
@@ -140,23 +109,21 @@ def profile(callback):
 
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton('❓ Как стать проверенным?', callback_data='howto_verify'))
-    
     user_offers = [o for o in offers if o['user_id'] == user_id]
     for i, offer in enumerate(user_offers):
         markup.add(types.InlineKeyboardButton(f'✏️ Изменить {i+1}', callback_data=f'edit_{i}'))
+    markup.add(types.InlineKeyboardButton('🔙 Назад', callback_data='back_to_main'))
 
     bot.send_message(user_id,
                      f"👤 @{user['username']}\n💼 Сделок: {user['deal_count']}\n💸 Комиссия: {commission}%\n🔖 Статус: {status}",
                      reply_markup=markup)
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith('edit_'))
 def edit_offer(callback):
     user_id = callback.from_user.id
     index = int(callback.data.split('_')[1])
     user_offers = [o for o in offers if o['user_id'] == user_id]
-    if index >= len(user_offers):
-        return
+    if index >= len(user_offers): return
     edit_offer_state[user_id] = user_offers[index]
     msg = bot.send_message(user_id, '✏️ Введите новое количество звёзд:')
     bot.register_next_step_handler(msg, save_edited_offer)
@@ -172,13 +139,16 @@ def save_edited_offer(message):
     except:
         bot.send_message(user_id, '❌ Ошибка.')
 
-
 @bot.callback_query_handler(func=lambda c: c.data == 'howto_verify')
 def howto_verify(callback):
-    bot.send_message(callback.from_user.id, '✅ Проведите 10 успешных сделок и вы станете проверенным!')
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton('🔙 Назад', callback_data='back_to_main'))
+    bot.send_message(callback.from_user.id, '✅ Проведите 10 успешных сделок и вы станете проверенным!', reply_markup=markup)
 
+@bot.callback_query_handler(func=lambda c: c.data == 'back_to_main')
+def back_to_main(callback):
+    start(callback.message)
 
-# 🔐 Админ-панель
 @bot.message_handler(commands=['adminpanel'])
 def admin_panel(message):
     if str(message.text).endswith(ADMIN_PANEL_PASSWORD):
@@ -198,7 +168,7 @@ def broadcast(callback):
 def send_broadcast(message):
     for uid in users:
         try:
-            bot.send_message(uid, f" {message.text}")
+            bot.send_message(uid, message.text)
         except:
             continue
 
@@ -261,7 +231,5 @@ def do_delete_offer(callback):
         offers.pop(index)
         bot.send_message(callback.from_user.id, '✅ Удалено.')
 
-
 print("✅ Бот запущен")
 bot.polling(none_stop=True)
-            
