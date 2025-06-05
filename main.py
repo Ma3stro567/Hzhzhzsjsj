@@ -1,7 +1,7 @@
 import telebot
 from telebot import types
 
-TOKEN = '7839295746:AAHovxVlK3ch2Ta6Nf-Yx8ShjEYRk_tZxYs'
+TOKEN = '7839295746:AAGwU5fwkV-zYLJh9E2X_nqXEQcZxzBCkKo'
 ADMIN_ID = 5083696616
 ADMIN_USERNAME = '@Ma3stro274'
 ADMIN_PANEL_PASSWORD = '148852'
@@ -236,4 +236,4 @@ def do_delete_offer(callback):
 
 print("✅ Бот запущен")
 bot.polling(none_stop=True)
-        
+bot.remove_webhook()
