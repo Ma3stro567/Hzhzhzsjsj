@@ -1,7 +1,7 @@
 import telebot
 from telebot import types
 
-TOKEN = '7839295746:AAFTpDNE41nEsAJ4Lr8opnps6BVE4ZrItxg'
+TOKEN = '7839295746:AAHTWOwC8WKLK_O-JCJSzZDgUGzEnIxUgN8'
 ADMIN_ID = 5083696616
 ADMIN_USERNAME = '@Ma3stro274'
 ADMIN_PANEL_PASSWORD = '148852'
@@ -30,6 +30,13 @@ def get_commission(user_id):
     verified = users.get(user_id, {}).get('verified', False)
     return 5 if verified else 10
 
+def show_main_menu(user_id):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton('🛒 Магазин', callback_data='shop'))
+    markup.add(types.InlineKeyboardButton('📤 Продать звезды', callback_data='sell'))
+    markup.add(types.InlineKeyboardButton('👤 Профиль', callback_data='profile'))
+    bot.send_message(user_id, '⭐ Добро пожаловать в Ma3stro shop!', reply_markup=markup)
+
 @bot.message_handler(commands=['start'])
 def start(message):
     if is_blacklisted(message.from_user.id):
@@ -41,12 +48,7 @@ def start(message):
     if user_id not in users:
         users[user_id] = {'username': username, 'verified': False, 'deal_count': 0}
 
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton('🛒 Магазин', callback_data='shop'))
-    markup.add(types.InlineKeyboardButton('📤 Продать звезды', callback_data='sell'))
-    markup.add(types.InlineKeyboardButton('👤 Профиль', callback_data='profile'))
-
-    bot.send_message(user_id, '⭐ Добро пожаловать в Ma3stro shop!', reply_markup=markup)
+    show_main_menu(user_id)
 
 @bot.callback_query_handler(func=lambda c: c.data == 'sell')
 def sell(callback):
@@ -147,7 +149,7 @@ def howto_verify(callback):
 
 @bot.callback_query_handler(func=lambda c: c.data == 'back_to_main')
 def back_to_main(callback):
-    start(callback.message)
+    show_main_menu(callback.from_user.id)
 
 @bot.message_handler(commands=['adminpanel'])
 def admin_panel(message):
@@ -158,6 +160,7 @@ def admin_panel(message):
         markup.add(types.InlineKeyboardButton('⛔ ЧС', callback_data='blacklist'))
         markup.add(types.InlineKeyboardButton('➕ Сделка', callback_data='deal_add'))
         markup.add(types.InlineKeyboardButton('🗑 Удалить предложение', callback_data='del_offer'))
+        markup.add(types.InlineKeyboardButton('🔙 Назад', callback_data='back_to_main'))
         bot.send_message(message.chat.id, '🔐 Админ панель:', reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data == 'broadcast')
@@ -233,3 +236,4 @@ def do_delete_offer(callback):
 
 print("✅ Бот запущен")
 bot.polling(none_stop=True)
+        
